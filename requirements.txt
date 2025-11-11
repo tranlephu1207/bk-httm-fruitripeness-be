@@ -1,0 +1,12 @@
+flask
+opencv-python-headless
+numpy==1.26.4
+joblib
+werkzeug
+scikit-learn==1.2.2
+gunicorn
+scikit-image
+mahotas
+flasgger
+Flask-JWT-Extended==4.6.0
+Flask-Cors
