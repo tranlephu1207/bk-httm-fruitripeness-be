@@ -1,0 +1,47 @@
+[
+  {
+    "id": "1",
+    "name": "Red Apple",
+    "description": "Crisp and sweet red apples, perfect for snacking.",
+    "price": 1.99,
+    "image": "https://images.unsplash.com/photo-1623815242959-fb20354f9b8d?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxmcmVzaCUyMHJlZCUyMGFwcGxlJTIwZnJ1aXR8ZW58MXx8fHwxNzYyMjcyOTA4fDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral",
+    "stock": 500,
+    "sold": 342,
+    "remaining": 158,
+    "updated_at": "2024-11-01T00:00:00Z"
+  },
+  {
+    "id": "2",
+    "name": "Banana",
+    "description": "Fresh yellow bananas, rich in potassium.",
+    "price": 0.89,
+    "image": "https://images.unsplash.com/photo-1573828235229-fb27fdc8da91?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxmcmVzaCUyMGJhbmFuYSUyMGZydWl0fGVufDF8fHx8MTc2MjI3MjkwOXww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral",
+    "stock": 400,
+    "sold": 289,
+    "remaining": 111,
+    "updated_at": "2024-11-01T00:00:00Z"
+  },
+  {
+    "id": "3",
+    "name": "Orange",
+    "description": "Juicy oranges packed with vitamin C.",
+    "price": 1.49,
+    "image": "https://images.unsplash.com/photo-1668617596950-a18f6a720c58?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxmcmVzaCUyMG9yYW5nZSUyMGNpdHJ1c3xlbnwxfHx8fDE3NjIyNzI5MDh8MA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral",
+    "stock": 350,
+    "sold": 198,
+    "remaining": 152,
+    "updated_at": "2024-11-01T00:00:00Z"
+  },
+  {
+    "id": "4",
+    "name": "Grapes",
+    "description": "Sweet purple grapes, great for snacking or making juice.",
+    "price": 3.99,
+    "image": "https://images.unsplash.com/photo-1596363505729-4190a9506133?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxmcmVzaCUyMGdyYXBlcyUyMGZydWl0fGVufDF8fHx8MTc2MjI3MjkwOXww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral",
+    "stock": 300,
+    "sold": 245,
+    "remaining": 55,
+    "updated_at": "2024-11-01T00:00:00Z"
+  }
+]
+
