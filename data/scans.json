@@ -1,5 +1,128 @@
 [
   {
+    "id": "6e5e9374c72a49e5b6b5cf0fc8feec85",
+    "timestamp": "2025-12-08T12:20:17Z",
+    "image_url": "/uploads/6e5e9374c72a49e5b6b5cf0fc8feec85.jpg",
+    "topk": [
+      {
+        "label": "RipeApple",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "score": 0.8114
+      },
+      {
+        "label": "RipePapaya",
+        "fruit": "papaya",
+        "ripeness": "ripe",
+        "score": 0.0432
+      },
+      {
+        "label": "RottenStrawberry",
+        "fruit": "strawberry",
+        "ripeness": "rotten",
+        "score": 0.0189
+      },
+      {
+        "label": "RottenApple",
+        "fruit": "apple",
+        "ripeness": "rotten",
+        "score": 0.0147
+      },
+      {
+        "label": "RipePomegranate",
+        "fruit": "pomegranate",
+        "ripeness": "ripe",
+        "score": 0.0108
+      }
+    ],
+    "user_agreed": true,
+    "user_selected_fruit": "apple",
+    "admin_corrected_fruit": null,
+    "saved": true
+  },
+  {
+    "id": "f04aecf518184e9997985ce957f1ff6b",
+    "timestamp": "2025-11-30T07:18:57Z",
+    "image_url": "/uploads/f04aecf518184e9997985ce957f1ff6b.jpg",
+    "topk": [
+      {
+        "label": "RipeGrape",
+        "fruit": "grape",
+        "ripeness": "ripe",
+        "score": 0.6225
+      },
+      {
+        "label": "RottenGrape",
+        "fruit": "grape",
+        "ripeness": "rotten",
+        "score": 0.1274
+      },
+      {
+        "label": "RottenStrawberry",
+        "fruit": "strawberry",
+        "ripeness": "rotten",
+        "score": 0.0294
+      },
+      {
+        "label": "RottenDragonFruit",
+        "fruit": "dragonfruit",
+        "ripeness": "rotten",
+        "score": 0.0262
+      },
+      {
+        "label": "RottenApple",
+        "fruit": "apple",
+        "ripeness": "rotten",
+        "score": 0.0218
+      }
+    ],
+    "user_agreed": true,
+    "user_selected_fruit": "grape",
+    "admin_corrected_fruit": null,
+    "saved": true
+  },
+  {
+    "id": "e457012494fa443da6cf9664b17d9f65",
+    "timestamp": "2025-11-30T07:18:01Z",
+    "image_url": "/uploads/e457012494fa443da6cf9664b17d9f65.jpg",
+    "topk": [
+      {
+        "label": "RipeApple",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "score": 0.2642
+      },
+      {
+        "label": "UnripeApple",
+        "fruit": "apple",
+        "ripeness": "unripe",
+        "score": 0.1028
+      },
+      {
+        "label": "RipePomegranate",
+        "fruit": "pomegranate",
+        "ripeness": "ripe",
+        "score": 0.0804
+      },
+      {
+        "label": "RottenGrape",
+        "fruit": "grape",
+        "ripeness": "rotten",
+        "score": 0.0604
+      },
+      {
+        "label": "RottenStrawberry",
+        "fruit": "strawberry",
+        "ripeness": "rotten",
+        "score": 0.0537
+      }
+    ],
+    "user_agreed": null,
+    "user_selected_fruit": null,
+    "admin_corrected_fruit": null,
+    "saved": false
+  },
+  {
     "id": "003c859a367145a490a16fbd45a33112",
     "timestamp": "2025-11-25T15:49:21Z",
     "image_url": "/uploads/003c859a367145a490a16fbd45a33112.jpg",
