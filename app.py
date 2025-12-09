@@ -1,8 +1,8 @@
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, render_template_string, send_from_directory, url_for
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from flasgger import Swagger
-from joblib import load
+from joblib import load, dump
 from src_ripeness.features import extract_all
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -11,11 +11,25 @@ import cv2
 import json
 import numpy as np
 import os
+import glob
+import shutil
+import time
+import base64
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from uuid import uuid4
+
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import SGDClassifier
+
+import torch
+import torch.nn as nn
+from torchvision import transforms
+from PIL import Image
+import torchvision.models as models
 
 app = Flask(__name__)
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'change-this-in-production')
@@ -26,10 +40,66 @@ swagger = Swagger(app)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 models_dir = "model_ripeness"
-base_models = load(f"{models_dir}/feature_svms.joblib")
+backup_dir = "backup"
+os.makedirs(backup_dir, exist_ok=True)
+
+
+def get_file_info(path: str) -> Dict[str, Any]:
+    """Return file existence and modified time in ISO format."""
+    if not os.path.exists(path):
+        return {"exists": False}
+    ts = os.path.getmtime(path)
+    return {
+        "exists": True,
+        "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+        "size_bytes": os.path.getsize(path),
+    }
+
+
+def get_feature_models_path(model_dir: str = models_dir) -> str:
+    """Get the path to the feature models file, with fallback to original."""
+    new_path = os.path.join(model_dir, "feature_models_xz.joblib")
+    old_path = os.path.join(model_dir, "feature_svms.joblib")
+    
+    # Try to load the new file first
+    try:
+        test_load = load(new_path)
+        print(f"Using feature_models_xz.joblib")
+        return new_path
+    except (KeyError, ValueError, EOFError, Exception) as e:
+        print(f"Warning: feature_models_xz.joblib failed to load ({e}), using feature_svms.joblib")
+        return old_path
+
+
+# Load base models with fallback
+feature_models_path = get_feature_models_path()
+base_models = load(feature_models_path)
+
 meta_clf = load(f"{models_dir}/meta_fusion.joblib")
 with open(f"{models_dir}/classes.txt") as f:
     classes = [line.strip() for line in f if line.strip()]
+
+# ==== ResNet model (for comparison) ====
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+try:
+    state = torch.load("model_resnet/cnn_on_fr.pth", map_location=device)
+    num_classes = state["fc.weight"].shape[0]
+    resnet_model = models.resnet50()
+    resnet_model.fc = nn.Linear(resnet_model.fc.in_features, num_classes)
+    resnet_model.load_state_dict(state)
+    resnet_model.to(device)
+    resnet_model.eval()
+    print(f"ResNet model loaded successfully on {device}")
+except Exception as e:
+    print(f"Warning: Failed to load ResNet model: {e}")
+    resnet_model = None
+
+resnet_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
 
 DATA_DIR = Path(os.environ.get('DATA_DIR', 'data'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DATA_DIR / 'uploads'))
@@ -177,6 +247,205 @@ def parse_label(label: str) -> Tuple[str, str]:
     return ripeness, fruit
 
 
+def convert_to_class_label(fruit_name: str, ripeness: Optional[str] = None) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Map a (fruit, ripeness) pair to a class index/name using the loaded classes.txt.
+    Falls back to fruit-only match if ripeness is missing.
+    """
+    if not fruit_name:
+        return None, None
+    fruit_clean = fruit_name.replace(" ", "").lower()
+    ripeness_clean = (ripeness or "").replace(" ", "").lower()
+    if ripeness_clean and ripeness_clean not in {"ripe", "unripe", "rotten"}:
+        ripeness_clean = ""
+
+    candidates = []
+    if ripeness_clean:
+        candidates.append(f"{ripeness_clean}{fruit_clean}")
+    candidates.append(fruit_clean)
+
+    for candidate in candidates:
+        for idx, cls in enumerate(classes):
+            if cls.lower() == candidate:
+                return idx, cls
+
+    # Fallback: match by fruit only even if class has ripeness prefix
+    for idx, cls in enumerate(classes):
+        _, cls_fruit = parse_label(cls)
+        if cls_fruit == fruit_clean:
+            return idx, cls
+
+    return None, None
+
+
+def predict_with_resnet(img_array: np.ndarray) -> Tuple[int, float]:
+    """
+    Predict using the ResNet model on a cv2 image array.
+    Returns (class_index, confidence_score) or (None, None) if unavailable.
+    """
+    if resnet_model is None:
+        return None, None
+
+    try:
+        img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        img_tensor = resnet_transform(pil_img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            output = resnet_model(img_tensor)
+            probs = torch.softmax(output, dim=1)[0]
+            confidence, class_idx = torch.max(probs, 0)
+        return int(class_idx), float(confidence)
+    except Exception as e:
+        print(f"Error in ResNet prediction: {e}")
+        return None, None
+
+
+def load_patches(data_root: str, size: int = 100):
+    X_feats = [[] for _ in range(8)]
+    y = []
+    classes_local = []
+    folders = [d for d in sorted(os.listdir(data_root)) if os.path.isdir(os.path.join(data_root, d))]
+    if "negtrain" in folders:
+        folders.remove("negtrain")
+        folders.append("negtrain")
+    classes_local = folders
+    for ci, c in enumerate(classes_local):
+        for p in glob.glob(os.path.join(data_root, c, "*")):
+            img = cv2.imread(p)
+            if img is None:
+                continue
+            img = cv2.resize(img, (size, size))
+            feats = extract_all(img)
+            if isinstance(feats, tuple):
+                for i in range(8):
+                    X_feats[i].append(feats[i])
+            y.append(ci)
+    X_feats = [np.array(x) for x in X_feats]
+    y = np.array(y, dtype=int)
+    return X_feats, y, classes_local
+
+
+def evaluate(test_root: str, model_dir: str = models_dir, size: int = 100):
+    feature_models_path = get_feature_models_path(model_dir)
+    feature_models = load(feature_models_path)
+    meta = load(os.path.join(model_dir, "meta_fusion.joblib"))
+    with open(os.path.join(model_dir, "classes.txt")) as f:
+        eval_classes = [line.strip() for line in f if line.strip()]
+
+    X_feats, y_true, _ = load_patches(test_root, size=size)
+
+    meta_inputs = []
+    for X, model in zip(X_feats, feature_models):
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X)
+        else:
+            ypred = model.predict(X)
+            proba = np.eye(len(eval_classes))[ypred]
+        meta_inputs.append(proba)
+    meta_X = np.concatenate(meta_inputs, axis=1)
+
+    imputer = SimpleImputer(strategy="constant", fill_value=0)
+    meta_X = imputer.fit_transform(meta_X)
+
+    y_pred = meta.predict(meta_X)
+
+    acc = accuracy_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred, average="macro")
+    return acc, f1
+
+
+def update_meta_model(
+    meta_model_path: str,
+    feature_models_path: str,
+    classes_path: str,
+    new_images: List[np.ndarray],
+    new_labels: List[int],
+    size: int = 100,
+    alpha: float = 0.1,
+):
+    """
+    Online update for meta-classifier (SGDClassifier) with safe blending, adapted
+    from IS_Assignment_251.
+    """
+    feature_models = load(feature_models_path)
+    meta = load(meta_model_path)
+
+    with open(classes_path) as f:
+        cls = [line.strip() for line in f]
+    n_classes = len(cls)
+    classes_arr = np.arange(0, n_classes)
+
+    meta_inputs = []
+    for img in new_images:
+        if isinstance(img, str):
+            img = cv2.imread(img)
+        if img is None:
+            raise ValueError("Invalid image for update")
+        img = cv2.resize(img, (size, size))
+        feats = extract_all(img)
+        feature_probas = []
+        for i, model in enumerate(feature_models):
+            X_feat = np.array(feats[i]).reshape(1, -1)
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X_feat)
+            else:
+                pred = model.predict(X_feat)
+                proba = np.eye(n_classes)[pred]
+            feature_probas.append(proba)
+        meta_input = np.concatenate(feature_probas, axis=1)
+        meta_inputs.append(meta_input)
+
+    meta_X = np.vstack(meta_inputs)
+    meta_y = np.array(new_labels, dtype=int).ravel()
+
+    if hasattr(meta, "coef_") and hasattr(meta, "intercept_"):
+        old_coef = meta.coef_.copy()
+        old_intercept = meta.intercept_.copy()
+    else:
+        old_coef = old_intercept = None
+
+    unique_labels = np.unique(meta_y)
+    try:
+        if len(unique_labels) == 1:
+            tmp_clf = SGDClassifier(
+                loss=meta.loss,
+                max_iter=meta.max_iter,
+                learning_rate=meta.learning_rate,
+                eta0=meta.eta0,
+                n_jobs=-1,
+                random_state=meta.random_state,
+                class_weight=None,
+            )
+            tmp_clf.classes_ = meta.classes_
+            tmp_clf.coef_ = meta.coef_.copy()
+            tmp_clf.intercept_ = meta.intercept_.copy()
+            tmp_clf.partial_fit(meta_X, meta_y, classes=classes_arr)
+            meta = tmp_clf
+        else:
+            meta.partial_fit(meta_X, meta_y)
+    except ValueError:
+        tmp_clf = SGDClassifier(
+            loss=meta.loss,
+            max_iter=meta.max_iter,
+            learning_rate=meta.learning_rate,
+            eta0=meta.eta0,
+            n_jobs=-1,
+            random_state=meta.random_state,
+            class_weight=None,
+        )
+        tmp_clf.classes_ = meta.classes_
+        tmp_clf.coef_ = meta.coef_.copy()
+        tmp_clf.intercept_ = meta.intercept_.copy()
+        tmp_clf.partial_fit(meta_X, meta_y, classes=classes_arr)
+        meta = tmp_clf
+
+    if old_coef is not None and hasattr(meta, "coef_"):
+        meta.coef_ = (1 - alpha) * old_coef + alpha * meta.coef_
+        meta.intercept_ = (1 - alpha) * old_intercept + alpha * meta.intercept_
+
+    dump(meta, meta_model_path)
+
+
 def run_inference(image_bytes: bytes, topk: int = 5) -> List[Dict[str, Any]]:
     file_bytes = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
@@ -238,11 +507,103 @@ HTML_FORM = """
   <input type=file name=image>
   <input type=submit value=Upload>
 </form>
+<a href="/update"><button>Update Model</button></a>
+<a href="/compare"><button>Compare Models</button></a>
 {% if result %}
   <h3>Result:</h3>
   <b>Fruit:</b> {{ result['fruit'] }}<br>
   <b>Ripeness:</b> {{ result['ripeness'] }}<br>
   <b>Score:</b> {{ result['score'] }}
+{% endif %}
+"""
+
+
+HTML_UPDATE_FORM = """
+<!doctype html>
+<title>Update Fruit Ripeness Model</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  .container { max-width: 600px; }
+  h2 { color: #333; }
+  form { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+  input[type="file"] { margin: 10px 0; }
+  input[type="submit"] { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+  input[type="submit"]:hover { background-color: #45a049; }
+  .result { margin: 20px 0; padding: 15px; border-radius: 5px; }
+  .accepted { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+  .rejected { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+  .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+  .metrics { margin: 10px 0; font-family: monospace; }
+</style>
+<div class="container">
+  <h2>Update Fruit Ripeness Model</h2>
+  <p>Upload an image to update and train the model with new data.</p>
+  <form method=post enctype=multipart/form-data>
+    <label for="image">Select image:</label><br>
+    <input type=file name=image required>
+    <input type=submit value="Update Model">
+  </form>
+  
+  {% if result %}
+    {% if result.get('error') %}
+      <div class="result error">
+        <h3>Error:</h3>
+        <p>{{ result['error'] }}</p>
+      </div>
+    {% elif result.get('result') == 'accepted' %}
+      <div class="result accepted">
+        <h3>Model Update Accepted</h3>
+        <p>The model has been successfully updated with improved performance.</p>
+        <div class="metrics">
+          <b>Old Accuracy:</b> {{ "%.4f" % result['old_acc'] }}<br>
+          <b>New Accuracy:</b> {{ "%.4f" % result['new_acc'] }}<br>
+        </div>
+      </div>
+    {% elif result.get('result') == 'rejected' %}
+      <div class="result rejected">
+        <h3>Model Update Rejected</h3>
+        <p>The update was rejected. Original model restored.</p>
+        <div class="metrics">
+          <b>Old Accuracy:</b> {{ "%.4f" % result['old_acc'] }}<br>
+          <b>New Accuracy:</b> {{ "%.4f" % result['new_acc'] }}<br>
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+</div>
+"""
+
+
+HTML_FORM_COMPARE = """
+<!doctype html>
+<title>Compare Models</title>
+<h2>Upload an image to compare models</h2>
+
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="image">
+  <input type="submit" value="Upload">
+</form>
+
+{% if result %}
+  <img src="{{ result['image'] }}" alt="Uploaded analysis result" style="max-width: 300px; display:block; margin-top: 16px;">
+  <h3>Meta Fusion Model</h3>
+  <b>Name:</b> {{ result['current_model']['name'] }}<br>
+  <b>Fruit:</b> {{ result['current_model']['fruit'] }}<br>
+  <b>Ripeness:</b> {{ result['current_model']['ripeness'] }}<br>
+  <b>Score:</b> {{ result['current_model']['score'] }}<br>
+  <b>Accuracy (approx):</b> {{ result['current_model']['accuracy'] }}%<br>
+  <b>Time:</b> {{ result['current_model']['time'] }} s<br>
+
+  <hr>
+
+  <h3>ResNet Model</h3>
+  <b>Name:</b> {{ result['resnet_model']['name'] }}<br>
+  <b>Fruit:</b> {{ result['resnet_model']['fruit'] }}<br>
+  <b>Ripeness:</b> {{ result['resnet_model']['ripeness'] }}<br>
+  <b>Score:</b> {{ result['resnet_model']['score'] }}<br>
+  <b>Accuracy (approx):</b> {{ result['resnet_model']['accuracy'] }}%<br>
+  <b>Time:</b> {{ result['resnet_model']['time'] }} s<br>
+  <hr>
 {% endif %}
 """
 
@@ -333,6 +694,188 @@ def predict():
     }
     return jsonify(response)
 
+
+@app.route('/compare', methods=['GET', 'POST'])
+def compare():
+    """
+    Compare predictions between the current Meta Fusion model and ResNet
+    using the same image, similar to IS_Assignment_251.
+    """
+    result = None
+    if request.method == 'POST':
+        if resnet_model is None:
+            return jsonify({'error': 'ResNet model not available'}), 500
+
+        file = request.files.get('image')
+        if file is None:
+            return jsonify({'error': 'No image uploaded'}), 400
+
+        raw = file.read()
+        file_bytes = np.frombuffer(raw, np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({'error': 'Cannot read image'}), 400
+
+        # Save uploaded file to UPLOAD_DIR for visualization
+        scan_id = uuid4().hex
+        filename = secure_filename(file.filename or f"{scan_id}.jpg")
+        _, ext = os.path.splitext(filename)
+        if not ext:
+            ext = ".jpg"
+        stored_name = f"{scan_id}{ext}"
+        upload_path = UPLOAD_DIR / stored_name
+        upload_path.write_bytes(raw)
+        image_url = url_for('serve_upload', filename=stored_name)
+
+        # Current Meta Fusion model
+        start_time_current = time.time()
+        img_resized = cv2.resize(img, (100, 100))
+        feats = extract_all(img_resized)
+        probs = []
+        for m, f in zip(base_models, feats):
+            prob = m.predict_proba([f])[0]
+            probs.append(prob)
+        meta_input = np.concatenate(probs).reshape(1, -1)
+        fused = meta_clf.predict_proba(meta_input)[0]
+        current_cidx = int(fused.argmax())
+        current_score = float(fused[current_cidx])
+        current_label = classes[current_cidx]
+        current_ripeness, current_fruit = parse_label(current_label)
+        current_time = time.time() - start_time_current
+
+        # ResNet model
+        start_time_resnet = time.time()
+        resnet_cidx, resnet_score = predict_with_resnet(img)
+        resnet_time = time.time() - start_time_resnet
+
+        if resnet_cidx is not None and resnet_cidx < len(classes):
+            resnet_label = classes[resnet_cidx]
+            resnet_ripeness, resnet_fruit = parse_label(resnet_label)
+        else:
+            resnet_label = "unknown"
+            resnet_ripeness = "unknown"
+            resnet_fruit = "unknown"
+            resnet_score = 0.0
+
+        current_accuracy = round(current_score * 100, 2)
+        resnet_accuracy = round(resnet_score * 100, 2) if resnet_score is not None else 0.0
+
+        result = {
+            'image': image_url,
+            'current_model': {
+                'name': 'Meta Fusion',
+                'fruit': current_fruit,
+                'ripeness': current_ripeness,
+                'score': round(current_score, 4),
+                'accuracy': current_accuracy,
+                'time': round(current_time, 2),
+            },
+            'resnet_model': {
+                'name': 'ResNet',
+                'fruit': resnet_fruit,
+                'ripeness': resnet_ripeness,
+                'score': round(resnet_score, 4),
+                'accuracy': resnet_accuracy,
+                'time': round(resnet_time, 2),
+            },
+        }
+
+    return render_template_string(HTML_FORM_COMPARE, result=result)
+
+
+@app.route('/update', methods=['GET', 'POST'])
+def update():
+    """
+    Online learning endpoint adapted from IS_Assignment_251.
+    Uses images in image/temp as pre-update and evaluates on image/ as test root.
+    """
+    result = None
+    if request.method == 'POST':
+        if 'image' not in request.files:
+            result = {'error': 'No image uploaded'}
+        else:
+            file = request.files['image']
+            file_bytes = np.frombuffer(file.read(), np.uint8)
+            img = [cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)]
+            if img[0] is None:
+                result = {'error': 'Cannot read image'}
+            else:
+                label = [0]
+                meta_model_path = os.path.join(models_dir, 'meta_fusion.joblib')
+                feature_models_path = get_feature_models_path(models_dir)
+                classes_path = os.path.join(models_dir, 'classes.txt')
+                test_root = os.path.join(os.getcwd(), 'image')
+                fruits_dir = os.path.join(test_root, 'temp')
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, 'meta_fusion.joblib')
+
+                shutil.copy(meta_model_path, backup_path)
+                try:
+                    old_acc, old_f1 = evaluate(test_root, model_dir=models_dir, size=100)
+                except Exception as e:
+                    result = {'error': f'Failed to evaluate old model: {str(e)}'}
+                    return render_template_string(HTML_UPDATE_FORM, result=result)
+
+                # Pre-training with existing temp images
+                if os.path.isdir(fruits_dir):
+                    for filename in os.listdir(fruits_dir):
+                        image_path = os.path.join(fruits_dir, filename)
+                        image_f = [cv2.imread(image_path, cv2.IMREAD_COLOR)]
+                        label_f = [0]
+                        if image_f[0] is None:
+                            continue
+                        update_meta_model(
+                            meta_model_path,
+                            feature_models_path,
+                            classes_path,
+                            image_f,
+                            label_f,
+                            size=100,
+                            alpha=0.1,
+                        )
+                        new_acc_f, new_f1_f = evaluate(test_root, model_dir=models_dir, size=100)
+                        if new_acc_f <= old_acc:
+                            shutil.copy(backup_path, meta_model_path)
+
+                # Main update with user image
+                try:
+                    update_meta_model(
+                        meta_model_path,
+                        feature_models_path,
+                        classes_path,
+                        img,
+                        label,
+                        size=100,
+                        alpha=0.1,
+                    )
+                except Exception as e:
+                    result = {'error': f'Update failed: {str(e)}'}
+                    return render_template_string(HTML_UPDATE_FORM, result=result)
+
+                try:
+                    new_acc, new_f1 = evaluate(test_root, model_dir=models_dir, size=100)
+                except Exception as e:
+                    result = {'error': f'Failed to evaluate new model: {str(e)}'}
+                    return render_template_string(HTML_UPDATE_FORM, result=result)
+
+                if new_acc > old_acc:
+                    result = {
+                        'result': 'accepted',
+                        'old_acc': old_acc,
+                        'new_acc': new_acc,
+                    }
+                else:
+                    shutil.copy(backup_path, meta_model_path)
+                    os.makedirs(fruits_dir, exist_ok=True)
+                    fname = f'img_{int(time.time())}.jpg'
+                    cv2.imwrite(os.path.join(fruits_dir, fname), img[0])
+                    result = {
+                        'result': 'rejected',
+                        'old_acc': old_acc,
+                        'new_acc': new_acc,
+                    }
+
+    return render_template_string(HTML_UPDATE_FORM, result=result)
 
 @app.route('/predict_topk', methods=['POST'])
 def predict_topk():
@@ -538,6 +1081,7 @@ def analytics_summary():
 
     daily_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {'total': 0, 'agreed': 0, 'disagreed': 0})
     fruit_breakdown: Dict[str, Dict[str, int]] = defaultdict(lambda: {'count': 0, 'agreed': 0, 'disagreed': 0})
+    samples_by_date: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
     for scan in scans:
         timestamp = scan.get('timestamp') or ''
@@ -555,6 +1099,44 @@ def analytics_summary():
             entry['disagreed'] += 1
             fruit_entry['disagreed'] += 1
 
+        # collect samples for UI
+        top_pred = (scan.get('topk') or [{}])[0]
+        predicted_label = top_pred.get('label')
+        predicted_fruit = top_pred.get('fruit')
+        predicted_ripeness = top_pred.get('ripeness')
+
+        user_label = None
+        user_fruit = None
+        user_ripeness = None
+        if agreed is True and predicted_label:
+            user_label = predicted_label
+            user_fruit = predicted_fruit
+            user_ripeness = predicted_ripeness
+        elif scan.get('user_selected_fruit'):
+            user_label = scan.get('user_selected_fruit')
+            user_fruit = scan.get('user_selected_fruit')
+            user_ripeness = predicted_ripeness
+
+        admin_label = scan.get('admin_corrected_fruit') or None
+        admin_fruit = admin_label
+        admin_ripeness = predicted_ripeness if admin_label else None
+
+        samples_by_date[date_key].append({
+            'id': scan.get('id'),
+            'image_url': scan.get('image_url'),
+            'predicted_label': predicted_label,
+            'predicted_fruit': predicted_fruit,
+            'predicted_ripeness': predicted_ripeness,
+            'user_label': user_label,
+            'user_fruit': user_fruit,
+            'user_ripeness': user_ripeness,
+            'admin_label': admin_label,
+            'admin_fruit': admin_fruit,
+            'admin_ripeness': admin_ripeness,
+            'user_agreed': agreed,
+            'timestamp': scan.get('timestamp'),
+        })
+
     overall_accuracy = (user_agreed / total) if total else 0
 
     daily = [
@@ -563,7 +1145,8 @@ def analytics_summary():
             'total': stats['total'],
             'correct': stats['agreed'],
             'incorrect': stats['disagreed'],
-            'accuracy': round((stats['agreed'] / stats['total']) * 100, 2) if stats['total'] else 0
+            'accuracy': round((stats['agreed'] / stats['total']) * 100, 2) if stats['total'] else 0,
+            'samples': samples_by_date.get(date, [])[:50],
         }
         for date, stats in sorted(daily_stats.items(), reverse=True)
     ]
@@ -590,6 +1173,193 @@ def analytics_summary():
         'daily': daily,
         'fruits': fruits
     })
+
+
+@app.route('/update_batch', methods=['POST'])
+def update_batch():
+    """
+    Receives a list of labeled images (predicted/user/admin labels) and updates the model.
+    Expected JSON:
+    {
+      "images": [
+        {
+          "image_url": "...",
+          "image_base64": "...",   # optional
+          "fruit": "...",          # or predicted_fruit/user_fruit/admin_fruit
+          "ripeness": "...",       # optional ripeness; will fall back to predicted_ripeness
+          "predicted_fruit": "...",
+          "predicted_ripeness": "...",
+          "user_fruit": "...",
+          "user_ripeness": "...",
+          "admin_fruit": "...",
+          "admin_ripeness": "..."
+        }
+      ],
+      "force": false
+    }
+    """
+    if not request.is_json:
+        return jsonify({'error': 'Content-Type must be application/json'}), 400
+
+    data = request.get_json()
+    images_data = data.get('images') or data.get('samples')
+    if not images_data or not isinstance(images_data, list):
+        return jsonify({'error': '"images" must be a non-empty list'}), 400
+
+    back_up = os.path.join(backup_dir, 'meta_fusion.joblib')
+    meta_model_path = os.path.join(models_dir, 'meta_fusion.joblib')
+    feature_models_path = get_feature_models_path(models_dir)
+    classes_path = os.path.join(models_dir, 'classes.txt')
+    test_root = os.path.join(os.getcwd(), 'image')
+    fruits_dir = os.path.join(test_root, 'temp')
+
+    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(fruits_dir, exist_ok=True)
+
+    shutil.copy(meta_model_path, back_up)
+
+    try:
+        old_acc, old_f1 = evaluate(test_root, model_dir=models_dir, size=100)
+    except Exception as e:
+        return jsonify({'error': f'Failed to evaluate old model: {str(e)}'}), 500
+
+    processed_images: List[np.ndarray] = []
+    processed_labels: List[int] = []
+    errors: List[str] = []
+
+    for idx, img_data in enumerate(images_data):
+        try:
+            img = None
+            if img_data.get('image_base64'):
+                img_data_b64 = img_data['image_base64']
+                if img_data_b64.startswith('data:image'):
+                    img_data_b64 = img_data_b64.split(',')[1]
+                img_bytes = base64.b64decode(img_data_b64)
+                img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+            elif img_data.get('image_url'):
+                img_path = img_data['image_url']
+                # Normalize dashboard-style /uploads/ paths
+                if img_path.startswith('/uploads/'):
+                    normalized = os.path.join(str(UPLOAD_DIR), img_path.lstrip('/uploads/'))
+                    if os.path.exists(normalized):
+                        img = cv2.imread(normalized, cv2.IMREAD_COLOR)
+                if img is None:
+                    if not os.path.isabs(img_path):
+                        if os.path.exists(img_path):
+                            img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                        else:
+                            data_dir = os.environ.get('DATA_DIR', '')
+                            if data_dir:
+                                full_path = os.path.join(data_dir, img_path.lstrip('/'))
+                                if os.path.exists(full_path):
+                                    img = cv2.imread(full_path, cv2.IMREAD_COLOR)
+                            if img is None:
+                                upload_path = os.path.join(str(UPLOAD_DIR), img_path.lstrip('/uploads/'))
+                                if os.path.exists(upload_path):
+                                    img = cv2.imread(upload_path, cv2.IMREAD_COLOR)
+                    else:
+                        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+
+            if img is None:
+                errors.append(f"Image {idx}: Cannot read image")
+                continue
+
+            fruit = (img_data.get('admin_fruit')
+                     or img_data.get('user_fruit')
+                     or img_data.get('fruit')
+                     or img_data.get('predicted_fruit')
+                     or '').strip()
+            ripeness = (img_data.get('admin_ripeness')
+                        or img_data.get('user_ripeness')
+                        or img_data.get('ripeness')
+                        or img_data.get('predicted_ripeness')
+                        or '').strip()
+
+            class_idx, class_name = convert_to_class_label(fruit, ripeness if ripeness else None)
+            if class_idx is None:
+                errors.append(f"Image {idx}: Invalid fruit/ripeness combination (fruit='{fruit}', ripeness='{ripeness}')")
+                continue
+
+            processed_images.append(img)
+            processed_labels.append(class_idx)
+        except Exception as e:
+            errors.append(f"Image {idx}: Error processing - {str(e)}")
+            continue
+
+    if len(processed_images) == 0:
+        shutil.copy(back_up, meta_model_path)
+        return jsonify({'error': 'No valid images processed', 'details': errors}), 400
+
+    try:
+        update_meta_model(
+            meta_model_path,
+            feature_models_path,
+            classes_path,
+            processed_images,
+            processed_labels,
+            size=100,
+            alpha=0.1
+        )
+    except Exception as e:
+        shutil.copy(back_up, meta_model_path)
+        return jsonify({'error': f'Failed to update model: {str(e)}'}), 500
+
+    try:
+        new_acc, new_f1 = evaluate(test_root, model_dir=models_dir, size=100)
+    except Exception as e:
+        shutil.copy(back_up, meta_model_path)
+        return jsonify({'error': f'Failed to evaluate new model: {str(e)}'}), 500
+
+    if new_acc > old_acc or data.get('force'):
+        result = {
+            'result': 'accepted',
+            'old_acc': old_acc,
+            'new_acc': new_acc,
+            'old_f1': old_f1,
+            'new_f1': new_f1,
+            'processed_count': len(processed_images),
+            'total_count': len(images_data),
+            'errors': errors if errors else None
+        }
+        return jsonify(result), 200
+
+    shutil.copy(back_up, meta_model_path)
+    for idx, img in enumerate(processed_images):
+        fname = f'rejected_{int(time.time())}_{idx}.jpg'
+        cv2.imwrite(os.path.join(fruits_dir, fname), img)
+
+    result = {
+        'result': 'rejected',
+        'old_acc': old_acc,
+        'new_acc': new_acc,
+        'old_f1': old_f1,
+        'new_f1': new_f1,
+        'processed_count': len(processed_images),
+        'total_count': len(images_data),
+        'note': 'Update rejected: new accuracy not better than old accuracy',
+        'errors': errors if errors else None
+    }
+    return jsonify(result), 200
+
+
+@app.route('/model_info', methods=['GET'])
+def model_info():
+    """Provide current model metadata for dashboard."""
+    meta_model_path = os.path.join(models_dir, "meta_fusion.joblib")
+    feature_models_path = get_feature_models_path()
+    classes_path = os.path.join(models_dir, "classes.txt")
+
+    info = {
+        "version": os.environ.get("MODEL_VERSION", "unknown"),
+        "last_updated": get_file_info(meta_model_path).get("modified"),
+        "feature_models_path": feature_models_path,
+        "meta_fusion_path": meta_model_path,
+        "classes_path": classes_path,
+        "meta_model": get_file_info(meta_model_path),
+        "feature_models": get_file_info(feature_models_path),
+        "classes": get_file_info(classes_path),
+    }
+    return jsonify(info), 200
 
 
 # Initialize admin account on startup

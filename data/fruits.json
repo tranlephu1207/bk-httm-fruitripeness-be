@@ -5,10 +5,10 @@
     "description": "Crisp and sweet red apples, perfect for snacking.",
     "price": 1.99,
     "image": "https://images.unsplash.com/photo-1623815242959-fb20354f9b8d?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxmcmVzaCUyMHJlZCUyMGFwcGxlJTIwZnJ1aXR8ZW58MXx8fHwxNzYyMjcyOTA4fDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral",
-    "stock": 500,
+    "stock": 520,
     "sold": 342,
-    "remaining": 158,
-    "updated_at": "2024-11-01T00:00:00Z"
+    "remaining": 178,
+    "updated_at": "2025-11-30T07:16:22Z"
   },
   {
     "id": "2",
@@ -44,4 +44,3 @@
     "updated_at": "2024-11-01T00:00:00Z"
   }
 ]
-

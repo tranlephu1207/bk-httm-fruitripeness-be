@@ -10,3 +10,6 @@ mahotas
 flasgger
 Flask-JWT-Extended==4.6.0
 Flask-Cors
+torch
+torchvision
+pillow
