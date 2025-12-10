@@ -25,5 +25,57 @@
     },
     "train_time_seconds": 11.9368,
     "note": "Update rejected: new accuracy not better than old accuracy"
+  },
+  {
+    "batch_id": "batch_20251208_1765347098966",
+    "status": "merged",
+    "merged_at": "2025-12-10T09:16:43Z",
+    "rejected_at": null,
+    "force": false,
+    "errors": [],
+    "images": [
+      {
+        "index": 0,
+        "image_url": "/uploads/6e5e9374c72a49e5b6b5cf0fc8feec85.jpg",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "status": "merged"
+      }
+    ],
+    "metrics_before": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "metrics_after": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "train_time_seconds": 10.6846
+  },
+  {
+    "batch_id": "batch_20251208_1765332297121",
+    "status": "merged",
+    "merged_at": "2025-12-10T09:17:05Z",
+    "rejected_at": null,
+    "force": false,
+    "errors": [],
+    "images": [
+      {
+        "index": 0,
+        "image_url": "/uploads/6e5e9374c72a49e5b6b5cf0fc8feec85.jpg",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "status": "merged"
+      }
+    ],
+    "metrics_before": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "metrics_after": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "train_time_seconds": 12.5176
   }
 ]
