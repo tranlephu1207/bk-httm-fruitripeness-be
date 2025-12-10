@@ -110,6 +110,7 @@ FRUITS_FILE = DATA_DIR / 'fruits.json'
 SCANS_FILE = DATA_DIR / 'scans.json'
 ORDERS_FILE = DATA_DIR / 'orders.json'
 USERS_FILE = DATA_DIR / 'users.json'
+BATCH_HISTORY_FILE = DATA_DIR / 'batch_history.json'
 
 DEFAULT_FRUITS: List[Dict[str, Any]] = [
     {
@@ -214,6 +215,29 @@ def load_users():
 def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f)
+
+
+def load_batch_history() -> List[Dict[str, Any]]:
+    """Load batch merge/reject history."""
+    return load_json(BATCH_HISTORY_FILE, [])
+
+
+def save_batch_history(data: List[Dict[str, Any]]) -> None:
+    """Persist batch merge/reject history."""
+    save_json(BATCH_HISTORY_FILE, data)
+
+
+PENDING_BATCHES_FILE = DATA_DIR / 'pending_batches.json'
+
+
+def load_pending_batches() -> Dict[str, Any]:
+    """Load pending batches awaiting admin confirmation."""
+    return load_json(PENDING_BATCHES_FILE, {})
+
+
+def save_pending_batches(data: Dict[str, Any]) -> None:
+    """Persist pending batches."""
+    save_json(PENDING_BATCHES_FILE, data)
 
 
 def init_admin_account():
@@ -1178,24 +1202,16 @@ def analytics_summary():
 @app.route('/update_batch', methods=['POST'])
 def update_batch():
     """
-    Receives a list of labeled images (predicted/user/admin labels) and updates the model.
+    Receives a list of labeled images and trains the model for preview.
+    By default, returns comparison metrics for admin review without auto-deciding.
+    Admin must call /confirm_batch to finalize merge/reject.
+    
     Expected JSON:
     {
-      "images": [
-        {
-          "image_url": "...",
-          "image_base64": "...",   # optional
-          "fruit": "...",          # or predicted_fruit/user_fruit/admin_fruit
-          "ripeness": "...",       # optional ripeness; will fall back to predicted_ripeness
-          "predicted_fruit": "...",
-          "predicted_ripeness": "...",
-          "user_fruit": "...",
-          "user_ripeness": "...",
-          "admin_fruit": "...",
-          "admin_ripeness": "..."
-        }
-      ],
-      "force": false
+      "images": [...],
+      "batch_id": "...",
+      "force": false,        # Override previously processed batch
+      "auto_decide": false   # If true, auto-merge/reject based on accuracy (legacy behavior)
     }
     """
     if not request.is_json:
@@ -1203,19 +1219,66 @@ def update_batch():
 
     data = request.get_json()
     images_data = data.get('images') or data.get('samples')
+    batch_id = data.get('batch_id') or data.get('batchId')
+    force_merge = bool(data.get('force'))
+    auto_decide = bool(data.get('auto_decide'))  # Legacy mode: auto merge/reject
+
+    if not batch_id or not isinstance(batch_id, str):
+        return jsonify({'error': '"batch_id" is required'}), 400
+
     if not images_data or not isinstance(images_data, list):
         return jsonify({'error': '"images" must be a non-empty list'}), 400
 
-    back_up = os.path.join(backup_dir, 'meta_fusion.joblib')
+    # Check batch history
+    batch_history = load_batch_history()
+    previous_entries = [entry for entry in batch_history if entry.get('batch_id') == batch_id]
+    
+    # Check pending batches
+    pending_batches = load_pending_batches()
+    
+    # If already finalized and not forcing, return the existing result
+    if previous_entries and not force_merge:
+        last_entry = previous_entries[-1]
+        return jsonify({
+            'result': last_entry.get('status'),
+            'batch_id': batch_id,
+            'status': last_entry.get('status'),
+            'old_acc': last_entry.get('metrics_before', {}).get('acc'),
+            'new_acc': last_entry.get('metrics_after', {}).get('acc'),
+            'old_f1': last_entry.get('metrics_before', {}).get('f1'),
+            'new_f1': last_entry.get('metrics_after', {}).get('f1'),
+            'merged_at': last_entry.get('merged_at'),
+            'rejected_at': last_entry.get('rejected_at'),
+            'train_time_seconds': last_entry.get('train_time_seconds'),
+            'note': 'Batch already finalized. Use force=true to reprocess.'
+        }), 200
+    
+    # If already pending review, return the pending state
+    if batch_id in pending_batches and not force_merge:
+        pending = pending_batches[batch_id]
+        return jsonify({
+            'result': 'pending_review',
+            'batch_id': batch_id,
+            'old_acc': pending.get('old_acc'),
+            'new_acc': pending.get('new_acc'),
+            'old_f1': pending.get('old_f1'),
+            'new_f1': pending.get('new_f1'),
+            'train_time_seconds': pending.get('train_time_seconds'),
+            'processed_count': pending.get('processed_count'),
+            'total_count': pending.get('total_count'),
+            'errors': pending.get('errors'),
+            'note': 'Batch pending admin review. Call /confirm_batch to finalize.'
+        }), 200
+
+    back_up = os.path.join(backup_dir, f'meta_fusion_{batch_id}.joblib')
     meta_model_path = os.path.join(models_dir, 'meta_fusion.joblib')
     feature_models_path = get_feature_models_path(models_dir)
     classes_path = os.path.join(models_dir, 'classes.txt')
     test_root = os.path.join(os.getcwd(), 'image')
-    fruits_dir = os.path.join(test_root, 'temp')
 
     os.makedirs(backup_dir, exist_ok=True)
-    os.makedirs(fruits_dir, exist_ok=True)
 
+    # Create batch-specific backup
     shutil.copy(meta_model_path, back_up)
 
     try:
@@ -1226,6 +1289,7 @@ def update_batch():
     processed_images: List[np.ndarray] = []
     processed_labels: List[int] = []
     errors: List[str] = []
+    image_records: List[Dict[str, Any]] = []
 
     for idx, img_data in enumerate(images_data):
         try:
@@ -1261,7 +1325,14 @@ def update_batch():
                         img = cv2.imread(img_path, cv2.IMREAD_COLOR)
 
             if img is None:
-                errors.append(f"Image {idx}: Cannot read image")
+                msg = f"Image {idx}: Cannot read image"
+                errors.append(msg)
+                image_records.append({
+                    'index': idx,
+                    'image_url': img_data.get('image_url'),
+                    'status': 'error',
+                    'reason': msg
+                })
                 continue
 
             fruit = (img_data.get('admin_fruit')
@@ -1277,20 +1348,59 @@ def update_batch():
 
             class_idx, class_name = convert_to_class_label(fruit, ripeness if ripeness else None)
             if class_idx is None:
-                errors.append(f"Image {idx}: Invalid fruit/ripeness combination (fruit='{fruit}', ripeness='{ripeness}')")
+                msg = f"Image {idx}: Invalid fruit/ripeness combination (fruit='{fruit}', ripeness='{ripeness}')"
+                errors.append(msg)
+                image_records.append({
+                    'index': idx,
+                    'image_url': img_data.get('image_url'),
+                    'fruit': fruit,
+                    'ripeness': ripeness,
+                    'status': 'error',
+                    'reason': msg
+                })
                 continue
 
             processed_images.append(img)
             processed_labels.append(class_idx)
+            image_records.append({
+                'index': idx,
+                'image_url': img_data.get('image_url'),
+                'fruit': fruit,
+                'ripeness': ripeness,
+                'status': 'pending'
+            })
         except Exception as e:
-            errors.append(f"Image {idx}: Error processing - {str(e)}")
+            msg = f"Image {idx}: Error processing - {str(e)}"
+            errors.append(msg)
+            image_records.append({
+                'index': idx,
+                'image_url': img_data.get('image_url'),
+                'status': 'error',
+                'reason': msg
+            })
             continue
 
     if len(processed_images) == 0:
         shutil.copy(back_up, meta_model_path)
-        return jsonify({'error': 'No valid images processed', 'details': errors}), 400
+        rejected_at = current_timestamp()
+        batch_history.append({
+            'batch_id': batch_id,
+            'status': 'rejected',
+            'rejected_at': rejected_at,
+            'merged_at': None,
+            'force': force_merge,
+            'errors': errors,
+            'images': image_records,
+            'metrics_before': None,
+            'metrics_after': None,
+            'train_time_seconds': 0.0,
+            'note': 'No valid images processed'
+        })
+        save_batch_history(batch_history)
+        return jsonify({'error': 'No valid images processed', 'details': errors, 'batch_id': batch_id}), 400
 
     try:
+        train_start = time.perf_counter()
         update_meta_model(
             meta_model_path,
             feature_models_path,
@@ -1300,36 +1410,143 @@ def update_batch():
             size=100,
             alpha=0.1
         )
+        train_time_seconds = round(time.perf_counter() - train_start, 4)
     except Exception as e:
         shutil.copy(back_up, meta_model_path)
-        return jsonify({'error': f'Failed to update model: {str(e)}'}), 500
+        rejected_at = current_timestamp()
+        batch_history.append({
+            'batch_id': batch_id,
+            'status': 'rejected',
+            'rejected_at': rejected_at,
+            'merged_at': None,
+            'force': force_merge,
+            'errors': errors + [f'Failed to update model: {str(e)}'],
+            'images': image_records,
+            'metrics_before': {'acc': old_acc, 'f1': old_f1},
+            'metrics_after': None,
+            'train_time_seconds': 0.0,
+            'note': 'Model update failed'
+        })
+        save_batch_history(batch_history)
+        return jsonify({'error': f'Failed to update model: {str(e)}', 'batch_id': batch_id}), 500
 
     try:
         new_acc, new_f1 = evaluate(test_root, model_dir=models_dir, size=100)
     except Exception as e:
         shutil.copy(back_up, meta_model_path)
-        return jsonify({'error': f'Failed to evaluate new model: {str(e)}'}), 500
+        rejected_at = current_timestamp()
+        batch_history.append({
+            'batch_id': batch_id,
+            'status': 'rejected',
+            'rejected_at': rejected_at,
+            'merged_at': None,
+            'force': force_merge,
+            'errors': errors + [f'Failed to evaluate new model: {str(e)}'],
+            'images': image_records,
+            'metrics_before': {'acc': old_acc, 'f1': old_f1},
+            'metrics_after': None,
+            'train_time_seconds': train_time_seconds,
+            'note': 'Evaluation failed'
+        })
+        save_batch_history(batch_history)
+        return jsonify({'error': f'Failed to evaluate new model: {str(e)}', 'batch_id': batch_id}), 500
 
-    if new_acc > old_acc or data.get('force'):
-        result = {
-            'result': 'accepted',
+    current_time = current_timestamp()
+    
+    # If not auto_decide, save to pending and return for admin review
+    if not auto_decide:
+        # Store pending batch info for later confirmation
+        pending_batches = load_pending_batches()
+        pending_batches[batch_id] = {
+            'batch_id': batch_id,
+            'backup_path': back_up,
+            'old_acc': old_acc,
+            'old_f1': old_f1,
+            'new_acc': new_acc,
+            'new_f1': new_f1,
+            'train_time_seconds': train_time_seconds,
+            'processed_count': len(processed_images),
+            'total_count': len(images_data),
+            'errors': errors if errors else [],
+            'images': image_records,
+            'created_at': current_time,
+            'force': force_merge
+        }
+        save_pending_batches(pending_batches)
+        
+        return jsonify({
+            'result': 'pending_review',
+            'batch_id': batch_id,
             'old_acc': old_acc,
             'new_acc': new_acc,
             'old_f1': old_f1,
             'new_f1': new_f1,
             'processed_count': len(processed_images),
             'total_count': len(images_data),
-            'errors': errors if errors else None
+            'errors': errors if errors else None,
+            'train_time_seconds': train_time_seconds,
+            'created_at': current_time,
+            'note': 'Model trained. Awaiting admin decision. Call /confirm_batch to finalize.'
+        }), 200
+
+    # Legacy auto-decide mode
+    if new_acc > old_acc or force_merge:
+        for record in image_records:
+            if record.get('status') == 'pending':
+                record['status'] = 'merged'
+        batch_entry = {
+            'batch_id': batch_id,
+            'status': 'merged',
+            'merged_at': current_time,
+            'rejected_at': None,
+            'force': force_merge,
+            'errors': errors if errors else [],
+            'images': image_records,
+            'metrics_before': {'acc': old_acc, 'f1': old_f1},
+            'metrics_after': {'acc': new_acc, 'f1': new_f1},
+            'train_time_seconds': train_time_seconds
+        }
+        batch_history.append(batch_entry)
+        save_batch_history(batch_history)
+        result = {
+            'result': 'accepted',
+            'batch_id': batch_id,
+            'old_acc': old_acc,
+            'new_acc': new_acc,
+            'old_f1': old_f1,
+            'new_f1': new_f1,
+            'processed_count': len(processed_images),
+            'total_count': len(images_data),
+            'errors': errors if errors else None,
+            'train_time_seconds': train_time_seconds,
+            'merged_at': current_time
         }
         return jsonify(result), 200
 
     shutil.copy(back_up, meta_model_path)
-    for idx, img in enumerate(processed_images):
-        fname = f'rejected_{int(time.time())}_{idx}.jpg'
-        cv2.imwrite(os.path.join(fruits_dir, fname), img)
+    for record in image_records:
+        if record.get('status') == 'pending':
+            record['status'] = 'rejected'
+
+    batch_entry = {
+        'batch_id': batch_id,
+        'status': 'rejected',
+        'merged_at': None,
+        'rejected_at': current_time,
+        'force': force_merge,
+        'errors': errors if errors else [],
+        'images': image_records,
+        'metrics_before': {'acc': old_acc, 'f1': old_f1},
+        'metrics_after': {'acc': new_acc, 'f1': new_f1},
+        'train_time_seconds': train_time_seconds,
+        'note': 'Update rejected: new accuracy not better than old accuracy'
+    }
+    batch_history.append(batch_entry)
+    save_batch_history(batch_history)
 
     result = {
         'result': 'rejected',
+        'batch_id': batch_id,
         'old_acc': old_acc,
         'new_acc': new_acc,
         'old_f1': old_f1,
@@ -1337,9 +1554,216 @@ def update_batch():
         'processed_count': len(processed_images),
         'total_count': len(images_data),
         'note': 'Update rejected: new accuracy not better than old accuracy',
-        'errors': errors if errors else None
+        'errors': errors if errors else None,
+        'train_time_seconds': train_time_seconds,
+        'rejected_at': current_time
     }
     return jsonify(result), 200
+
+
+@app.route('/confirm_batch/<batch_id>', methods=['POST'])
+def confirm_batch(batch_id: str):
+    """
+    Confirm or reject a pending batch after admin review.
+    
+    Expected JSON:
+    {
+      "action": "accept" | "reject"
+    }
+    """
+    if not request.is_json:
+        return jsonify({'error': 'Content-Type must be application/json'}), 400
+
+    data = request.get_json()
+    action = data.get('action', '').lower()
+    
+    if action not in ('accept', 'reject'):
+        return jsonify({'error': '"action" must be "accept" or "reject"'}), 400
+
+    pending_batches = load_pending_batches()
+    
+    if batch_id not in pending_batches:
+        # Check if already finalized
+        batch_history = load_batch_history()
+        previous_entries = [entry for entry in batch_history if entry.get('batch_id') == batch_id]
+        if previous_entries:
+            last_entry = previous_entries[-1]
+            return jsonify({
+                'error': 'Batch already finalized',
+                'batch_id': batch_id,
+                'status': last_entry.get('status'),
+                'merged_at': last_entry.get('merged_at'),
+                'rejected_at': last_entry.get('rejected_at')
+            }), 409
+        return jsonify({'error': f'Pending batch {batch_id} not found'}), 404
+
+    pending = pending_batches[batch_id]
+    backup_path = pending.get('backup_path')
+    meta_model_path = os.path.join(models_dir, 'meta_fusion.joblib')
+    current_time = current_timestamp()
+    
+    batch_history = load_batch_history()
+    image_records = pending.get('images', [])
+    
+    if action == 'accept':
+        # Keep the new model (already in place after training)
+        for record in image_records:
+            if record.get('status') == 'pending':
+                record['status'] = 'merged'
+        
+        batch_entry = {
+            'batch_id': batch_id,
+            'status': 'merged',
+            'merged_at': current_time,
+            'rejected_at': None,
+            'force': pending.get('force', False),
+            'errors': pending.get('errors', []),
+            'images': image_records,
+            'metrics_before': {'acc': pending['old_acc'], 'f1': pending['old_f1']},
+            'metrics_after': {'acc': pending['new_acc'], 'f1': pending['new_f1']},
+            'train_time_seconds': pending.get('train_time_seconds', 0)
+        }
+        batch_history.append(batch_entry)
+        save_batch_history(batch_history)
+        
+        # Remove from pending
+        del pending_batches[batch_id]
+        save_pending_batches(pending_batches)
+        
+        # Clean up backup file
+        if backup_path and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
+        
+        return jsonify({
+            'result': 'accepted',
+            'batch_id': batch_id,
+            'old_acc': pending['old_acc'],
+            'new_acc': pending['new_acc'],
+            'old_f1': pending['old_f1'],
+            'new_f1': pending['new_f1'],
+            'train_time_seconds': pending.get('train_time_seconds'),
+            'merged_at': current_time
+        }), 200
+    
+    else:  # action == 'reject'
+        # Restore the backup model
+        if backup_path and os.path.exists(backup_path):
+            shutil.copy(backup_path, meta_model_path)
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
+        
+        for record in image_records:
+            if record.get('status') == 'pending':
+                record['status'] = 'rejected'
+        
+        batch_entry = {
+            'batch_id': batch_id,
+            'status': 'rejected',
+            'merged_at': None,
+            'rejected_at': current_time,
+            'force': pending.get('force', False),
+            'errors': pending.get('errors', []),
+            'images': image_records,
+            'metrics_before': {'acc': pending['old_acc'], 'f1': pending['old_f1']},
+            'metrics_after': {'acc': pending['new_acc'], 'f1': pending['new_f1']},
+            'train_time_seconds': pending.get('train_time_seconds', 0),
+            'note': 'Rejected by admin'
+        }
+        batch_history.append(batch_entry)
+        save_batch_history(batch_history)
+        
+        # Remove from pending
+        del pending_batches[batch_id]
+        save_pending_batches(pending_batches)
+        
+        return jsonify({
+            'result': 'rejected',
+            'batch_id': batch_id,
+            'old_acc': pending['old_acc'],
+            'new_acc': pending['new_acc'],
+            'old_f1': pending['old_f1'],
+            'new_f1': pending['new_f1'],
+            'train_time_seconds': pending.get('train_time_seconds'),
+            'rejected_at': current_time,
+            'note': 'Rejected by admin'
+        }), 200
+
+
+@app.route('/batch_history', methods=['GET'])
+def get_batch_history():
+    """
+    Fetch batch merge/reject history with optional filtering.
+    Query parameters:
+    - batch_id: Filter by specific batch ID
+    - status: Filter by status ('merged' or 'rejected')
+    - limit: Maximum number of results to return (default: 100)
+    """
+    batch_history = load_batch_history()
+    
+    # Filter by batch_id if provided
+    batch_id = request.args.get('batch_id')
+    if batch_id:
+        batch_history = [entry for entry in batch_history if entry.get('batch_id') == batch_id]
+    
+    # Filter by status if provided
+    status = request.args.get('status')
+    if status:
+        batch_history = [entry for entry in batch_history if entry.get('status') == status.lower()]
+    
+    # Sort by most recent first (merged_at or rejected_at)
+    def get_timestamp(entry):
+        return entry.get('merged_at') or entry.get('rejected_at') or ''
+    batch_history.sort(key=get_timestamp, reverse=True)
+    
+    # Apply limit
+    limit = request.args.get('limit', type=int, default=100)
+    if limit > 0:
+        batch_history = batch_history[:limit]
+    
+    # Calculate summary statistics
+    total_batches = len(load_batch_history())
+    merged_count = sum(1 for entry in load_batch_history() if entry.get('status') == 'merged')
+    rejected_count = sum(1 for entry in load_batch_history() if entry.get('status') == 'rejected')
+    
+    return jsonify({
+        'batches': batch_history,
+        'summary': {
+            'total': total_batches,
+            'merged': merged_count,
+            'rejected': rejected_count,
+            'returned': len(batch_history)
+        }
+    }), 200
+
+
+@app.route('/batch_history/<batch_id>', methods=['GET'])
+def get_batch_by_id(batch_id):
+    """
+    Get detailed information about a specific batch by ID.
+    Returns all history entries for this batch_id (in case of force merges).
+    """
+    batch_history = load_batch_history()
+    entries = [entry for entry in batch_history if entry.get('batch_id') == batch_id]
+    
+    if not entries:
+        return jsonify({'error': f'Batch {batch_id} not found'}), 404
+    
+    # Sort by most recent first
+    def get_timestamp(entry):
+        return entry.get('merged_at') or entry.get('rejected_at') or ''
+    entries.sort(key=get_timestamp, reverse=True)
+    
+    return jsonify({
+        'batch_id': batch_id,
+        'entries': entries,
+        'latest': entries[0] if entries else None,
+        'total_entries': len(entries)
+    }), 200
 
 
 @app.route('/model_info', methods=['GET'])
