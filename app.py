@@ -1694,6 +1694,18 @@ def confirm_batch(batch_id: str):
         }), 200
 
 
+@app.route('/pending_batches', methods=['GET'])
+def get_pending_batches():
+    """
+    Fetch all batches pending admin review.
+    """
+    pending_batches = load_pending_batches()
+    return jsonify({
+        'batches': list(pending_batches.values()),
+        'count': len(pending_batches)
+    }), 200
+
+
 @app.route('/batch_history', methods=['GET'])
 def get_batch_history():
     """
