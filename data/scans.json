@@ -1,5 +1,87 @@
 [
   {
+    "id": "328f464b9b634f498faf3363c1f9b263",
+    "timestamp": "2025-12-10T06:10:30Z",
+    "image_url": "/uploads/328f464b9b634f498faf3363c1f9b263.jpg",
+    "topk": [
+      {
+        "label": "RipeApple",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "score": 0.6828
+      },
+      {
+        "label": "RipePapaya",
+        "fruit": "papaya",
+        "ripeness": "ripe",
+        "score": 0.0672
+      },
+      {
+        "label": "RottenPapaya",
+        "fruit": "papaya",
+        "ripeness": "rotten",
+        "score": 0.0579
+      },
+      {
+        "label": "RipePineapple",
+        "fruit": "pineapple",
+        "ripeness": "ripe",
+        "score": 0.0414
+      },
+      {
+        "label": "RottenApple",
+        "fruit": "apple",
+        "ripeness": "rotten",
+        "score": 0.0394
+      }
+    ],
+    "user_agreed": null,
+    "user_selected_fruit": null,
+    "admin_corrected_fruit": null,
+    "saved": false
+  },
+  {
+    "id": "71f3a5fc98114980b3fa52b19f8660d6",
+    "timestamp": "2025-12-10T06:09:25Z",
+    "image_url": "/uploads/71f3a5fc98114980b3fa52b19f8660d6.jpg",
+    "topk": [
+      {
+        "label": "RottenBanana",
+        "fruit": "banana",
+        "ripeness": "rotten",
+        "score": 0.6634
+      },
+      {
+        "label": "RipeApple",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "score": 0.2421
+      },
+      {
+        "label": "RottenDragonFruit",
+        "fruit": "dragonfruit",
+        "ripeness": "rotten",
+        "score": 0.0146
+      },
+      {
+        "label": "RottenPineapple",
+        "fruit": "pineapple",
+        "ripeness": "rotten",
+        "score": 0.0128
+      },
+      {
+        "label": "RottenPomegranate",
+        "fruit": "pomegranate",
+        "ripeness": "rotten",
+        "score": 0.0081
+      }
+    ],
+    "user_agreed": null,
+    "user_selected_fruit": null,
+    "admin_corrected_fruit": null,
+    "saved": false
+  },
+  {
     "id": "6e5e9374c72a49e5b6b5cf0fc8feec85",
     "timestamp": "2025-12-08T12:20:17Z",
     "image_url": "/uploads/6e5e9374c72a49e5b6b5cf0fc8feec85.jpg",
