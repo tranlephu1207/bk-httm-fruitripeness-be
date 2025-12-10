@@ -1698,11 +1698,31 @@ def confirm_batch(batch_id: str):
 def get_pending_batches():
     """
     Fetch all batches pending admin review.
+    Filters out any batches that are already finalized in batch_history.
     """
     pending_batches = load_pending_batches()
+    batch_history = load_batch_history()
+    
+    # Get set of finalized batch IDs from history
+    finalized_batch_ids = set(entry.get('batch_id') for entry in batch_history if entry.get('batch_id'))
+    
+    # Filter out any pending batches that are already finalized
+    active_pending = {}
+    stale_batch_ids = []
+    for batch_id, batch_data in pending_batches.items():
+        if batch_id not in finalized_batch_ids:
+            active_pending[batch_id] = batch_data
+        else:
+            stale_batch_ids.append(batch_id)
+    
+    # Clean up stale entries from pending_batches if any found
+    if stale_batch_ids:
+        print(f"Cleaning up {len(stale_batch_ids)} stale pending batches: {stale_batch_ids}")
+        save_pending_batches(active_pending)
+    
     return jsonify({
-        'batches': list(pending_batches.values()),
-        'count': len(pending_batches)
+        'batches': list(active_pending.values()),
+        'count': len(active_pending)
     }), 200
 
 

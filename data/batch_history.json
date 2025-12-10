@@ -77,5 +77,31 @@
       "f1": 0.13333333333333333
     },
     "train_time_seconds": 12.5176
+  },
+  {
+    "batch_id": "batch_20251208_1765347098966",
+    "status": "merged",
+    "merged_at": "2025-12-10T09:30:39Z",
+    "rejected_at": null,
+    "force": false,
+    "errors": [],
+    "images": [
+      {
+        "index": 0,
+        "image_url": "/uploads/6e5e9374c72a49e5b6b5cf0fc8feec85.jpg",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "status": "merged"
+      }
+    ],
+    "metrics_before": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "metrics_after": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "train_time_seconds": 10.6846
   }
 ]
