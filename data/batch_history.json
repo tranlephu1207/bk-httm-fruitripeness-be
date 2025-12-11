@@ -103,5 +103,46 @@
       "f1": 0.13333333333333333
     },
     "train_time_seconds": 10.6846
+  },
+  {
+    "batch_id": "batch_20251125_1765369529548",
+    "status": "rejected",
+    "merged_at": null,
+    "rejected_at": "2025-12-10T12:26:56Z",
+    "force": false,
+    "errors": [],
+    "images": [
+      {
+        "index": 0,
+        "image_url": "/uploads/003c859a367145a490a16fbd45a33112.jpg",
+        "fruit": "banana",
+        "ripeness": "rotten",
+        "status": "rejected"
+      },
+      {
+        "index": 1,
+        "image_url": "/uploads/771575bf769b46738d68fa7da8e32fdb.jpg",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "status": "rejected"
+      },
+      {
+        "index": 2,
+        "image_url": "/uploads/89b918e386aa434f8e1ba5a65b327e84.png",
+        "fruit": "apple",
+        "ripeness": "rotten",
+        "status": "rejected"
+      }
+    ],
+    "metrics_before": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "metrics_after": {
+      "acc": 0.25,
+      "f1": 0.13333333333333333
+    },
+    "train_time_seconds": 11.4473,
+    "note": "Rejected by admin"
   }
 ]

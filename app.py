@@ -533,12 +533,79 @@ HTML_FORM = """
 </form>
 <a href="/update"><button>Update Model</button></a>
 <a href="/compare"><button>Compare Models</button></a>
+<a href="/test_predict"><button>Test Predict</button></a>
 {% if result %}
   <h3>Result:</h3>
   <b>Fruit:</b> {{ result['fruit'] }}<br>
   <b>Ripeness:</b> {{ result['ripeness'] }}<br>
   <b>Score:</b> {{ result['score'] }}
 {% endif %}
+"""
+
+
+HTML_TEST_PREDICT = """
+<!doctype html>
+<html>
+<head>
+  <title>Test Predict - Fruit Ripeness Classifier</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h2 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+    form { margin: 20px 0; }
+    input[type="file"] { margin: 10px 0; padding: 10px; border: 2px dashed #ccc; width: 100%; box-sizing: border-box; }
+    input[type="submit"] { background-color: #4CAF50; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+    input[type="submit"]:hover { background-color: #45a049; }
+    .result { margin: 20px 0; padding: 20px; border-radius: 8px; background-color: #e8f5e9; border: 1px solid #c8e6c9; }
+    .result h3 { color: #2e7d32; margin-top: 0; }
+    .result-item { margin: 8px 0; font-size: 16px; }
+    .result-item b { color: #1b5e20; min-width: 100px; display: inline-block; }
+    .error { background-color: #ffebee; border-color: #ffcdd2; }
+    .error h3 { color: #c62828; }
+    .nav-buttons { margin-top: 20px; }
+    .nav-buttons a { margin-right: 10px; }
+    .nav-buttons button { padding: 8px 16px; border: 1px solid #ccc; background: #fff; border-radius: 4px; cursor: pointer; }
+    .nav-buttons button:hover { background: #f0f0f0; }
+    .score { font-size: 24px; font-weight: bold; color: #4CAF50; }
+    .label { background: #e3f2fd; padding: 5px 10px; border-radius: 4px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>🍎 Test Predict - Fruit Ripeness Classifier</h2>
+    <p>Upload an image to test the prediction directly (same logic as IS_Assignment_251).</p>
+    
+    <form method="post" enctype="multipart/form-data">
+      <input type="file" name="image" accept="image/*" required>
+      <br><br>
+      <input type="submit" value="🔍 Predict">
+    </form>
+    
+    {% if result %}
+      {% if result.get('error') %}
+        <div class="result error">
+          <h3>❌ Error</h3>
+          <p>{{ result['error'] }}</p>
+        </div>
+      {% else %}
+        <div class="result">
+          <h3>✅ Prediction Result</h3>
+          <div class="result-item"><b>Label:</b> <span class="label">{{ result['label'] }}</span></div>
+          <div class="result-item"><b>Fruit:</b> {{ result['fruit'] }}</div>
+          <div class="result-item"><b>Ripeness:</b> {{ result['ripeness'] }}</div>
+          <div class="result-item"><b>Score:</b> <span class="score">{{ result['score'] }}</span></div>
+        </div>
+      {% endif %}
+    {% endif %}
+    
+    <div class="nav-buttons">
+      <a href="/"><button>🏠 Home</button></a>
+      <a href="/compare"><button>📊 Compare Models</button></a>
+      <a href="/update"><button>🔄 Update Model</button></a>
+    </div>
+  </div>
+</body>
+</html>
 """
 
 
@@ -901,6 +968,45 @@ def update():
 
     return render_template_string(HTML_UPDATE_FORM, result=result)
 
+@app.route('/test_predict', methods=['GET', 'POST'])
+def test_predict():
+    """
+    Test prediction endpoint with HTML form.
+    Uses the same direct prediction logic as IS_Assignment_251.
+    """
+    result = None
+    if request.method == 'POST':
+        if 'image' not in request.files:
+            result = {'error': 'No image uploaded'}
+        else:
+            file = request.files['image']
+            file_bytes = np.frombuffer(file.read(), np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            if img is None:
+                result = {'error': 'Cannot read image'}
+            else:
+                # Same prediction logic as IS_Assignment_251
+                img_resized = cv2.resize(img, (100, 100))
+                feats = extract_all(img_resized)
+                probs = []
+                for m, f in zip(base_models, feats):
+                    prob = m.predict_proba([f])[0]
+                    probs.append(prob)
+                meta_input = np.concatenate(probs).reshape(1, -1)
+                fused = meta_clf.predict_proba(meta_input)[0]
+                cidx = int(fused.argmax())
+                cscore = float(fused[cidx])
+                label = classes[cidx]
+                ripeness, fruit = parse_label(label)
+                result = {
+                    'label': label,
+                    'fruit': fruit,
+                    'ripeness': ripeness,
+                    'score': round(cscore, 4)
+                }
+    return render_template_string(HTML_TEST_PREDICT, result=result)
+
+
 @app.route('/predict_topk', methods=['POST'])
 def predict_topk():
     file = request.files.get('image')
@@ -1079,7 +1185,6 @@ def update_scan(scan_id: str):
 
 
 @app.route('/scans/<scan_id>/feedback', methods=['POST'])
-@jwt_required()
 def record_feedback(scan_id: str):
     data = request.get_json(silent=True) or {}
     if 'user_agreed' not in data:
@@ -1138,12 +1243,18 @@ def analytics_summary():
             user_ripeness = predicted_ripeness
         elif scan.get('user_selected_fruit'):
             user_label = scan.get('user_selected_fruit')
-            user_fruit = scan.get('user_selected_fruit')
-            user_ripeness = predicted_ripeness
+            # Parse the user-selected label to extract fruit and ripeness
+            parsed_ripeness, parsed_fruit = parse_label(user_label)
+            user_fruit = parsed_fruit if parsed_fruit else user_label
+            user_ripeness = parsed_ripeness if parsed_ripeness != 'unknown' else predicted_ripeness
 
         admin_label = scan.get('admin_corrected_fruit') or None
-        admin_fruit = admin_label
-        admin_ripeness = predicted_ripeness if admin_label else None
+        admin_fruit = None
+        admin_ripeness = None
+        if admin_label:
+            parsed_admin_ripeness, parsed_admin_fruit = parse_label(admin_label)
+            admin_fruit = parsed_admin_fruit if parsed_admin_fruit else admin_label
+            admin_ripeness = parsed_admin_ripeness if parsed_admin_ripeness != 'unknown' else predicted_ripeness
 
         samples_by_date[date_key].append({
             'id': scan.get('id'),

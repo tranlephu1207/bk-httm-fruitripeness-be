@@ -1,1 +1,32 @@
-{}
+{
+  "batch_20251130_1765368296211": {
+    "batch_id": "batch_20251130_1765368296211",
+    "backup_path": "backup/meta_fusion_batch_20251130_1765368296211.joblib",
+    "old_acc": 0.25,
+    "old_f1": 0.13333333333333333,
+    "new_acc": 0.25,
+    "new_f1": 0.13333333333333333,
+    "train_time_seconds": 12.2391,
+    "processed_count": 2,
+    "total_count": 2,
+    "errors": [],
+    "images": [
+      {
+        "index": 0,
+        "image_url": "/uploads/f04aecf518184e9997985ce957f1ff6b.jpg",
+        "fruit": "grape",
+        "ripeness": "ripe",
+        "status": "pending"
+      },
+      {
+        "index": 1,
+        "image_url": "/uploads/e457012494fa443da6cf9664b17d9f65.jpg",
+        "fruit": "apple",
+        "ripeness": "ripe",
+        "status": "pending"
+      }
+    ],
+    "created_at": "2025-12-10T12:06:04Z",
+    "force": false
+  }
+}
